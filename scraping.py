@@ -11,8 +11,8 @@ today = datetime.today().strftime('%Y-%m-%d')
 script_dir = os.path.dirname(os.path.realpath(__file__))
 global todayshalts
 todayshalts = pd.DataFrame()
-file_path = os.path.join(script_dir, f"halts_{today}.csv")
-
+halt_data_dir = os.path.join(script_dir, "halt_data")
+file_path = os.path.join(halt_data_dir, f"halts_{today}.csv")
 
 # Function to download one-minute interval data for a given symbol and halt time
 def getCandle(symbol, halt_dt):
