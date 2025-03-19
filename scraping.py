@@ -11,6 +11,7 @@ today = datetime.today().strftime('%Y-%m-%d')
 script_dir = os.path.dirname(os.path.realpath(__file__))
 global todayshalts
 todayshalts = pd.DataFrame()
+file_path = os.path.join(script_dir, f"halts_{today}.csv")
 
 
 # Function to download one-minute interval data for a given symbol and halt time
@@ -36,13 +37,39 @@ def deleteBadTickers(halts):
     for idx, row in halts.iterrows():
         symbol = row['Ticker']
         halt_dt = row['Halt_dt']
-
+        halt_dt = halt_dt.floor('min')
         candle = getCandle(symbol, halt_dt)
         if len(candle['Open']) == 0:
             print("No data for this symbol: " + symbol)
             badTickeridx.append(idx)
     halts.drop(index=badTickeridx, inplace=True)
     print(halts.to_string())
+    return halts
+
+# Function to calculate the halt direction and price
+def haltDirandPrice(halts):
+    for idx, row in halts.iterrows():
+        symbol = row['Ticker']
+        halt_dt = row['Halt_dt']
+        halt_ts = pd.Timestamp(halt_dt)
+        halt_ts = halt_ts.floor('min')
+        
+        curCandle = getCandle(symbol, halt_ts)
+        prev_ts = halt_ts - timedelta(minutes=1)
+        prevCandle = getCandle(symbol, prev_ts)
+        curLow = curCandle['Low'].iloc[0].item()
+        if len(prevCandle['Open']) == 0:
+            prevLow = curLow
+        else:
+            prevLow = prevCandle['Low'].iloc[0].item()
+        halt_price = curCandle['Close'].iloc[0].item()
+        low = min(curLow, prevLow)
+        if halt_price > low:
+            direction = 'UP'
+        else:
+            direction = 'DOWN'
+        halts.loc[idx, 'Direction'] = direction
+        halts.loc[idx, 'Halt Price'] = halt_price
     return halts
 
 # helper function to get the halts
@@ -81,6 +108,7 @@ def getHalts():
     halts['Halt_dt'] = pd.to_datetime(halts['Halt Date'] + ' ' + halts['Halt Time'], format='%m/%d/%Y %H:%M:%S')
     halts['Resume_dt'] = pd.to_datetime(halts['Halt Date'] + ' ' + halts['Resumption Trade Time'], format='%m/%d/%Y %H:%M:%S')
     halts = halts.drop(['Halt Date', 'Halt Time', 'Market', 'Reason Codes', 'Resumption Trade Time'], axis=1)
+    halts['Halt Duration'] = ((halts['Resume_dt'] - halts['Halt_dt']).dt.total_seconds() // 60).astype(int)
     halts.rename(columns={"Issue Symbol": "Ticker"}, inplace=True)
     halts = deleteBadTickers(halts)
     return halts
@@ -88,11 +116,10 @@ def getHalts():
 # Get the halts for today or not 
 def haltSaverChecker():
     user_input = input("Do you want to update today's halts and update the file? (y/n): ").strip().lower()
-    file_path = os.path.join(script_dir, f"halts_{today}.csv")
+    
     if user_input == 'y':
         todayshalts = getHalts()
         todayshalts.to_csv(file_path, index=False)
-        # print("CSV file saved to:", os.path.abspath(file_path))
         print(todayshalts.to_string())
 
     else:
@@ -104,25 +131,9 @@ def haltSaverChecker():
 todayshalts = haltSaverChecker()
 print(todayshalts.to_string())
 
-    
-
-
-# Process each halt event in the DataFrame
-# results = []
-# for idx, row in todayshalts.iterrows():
-#     symbol = row['Issue Symbol']
-
-#     halt_dt = row['HaltDateTime']
-#     print("symbol:", symbol)
-#     print("halt_dt:", halt_dt)
-
-#     candle = getCandle(symbol, halt_dt)
-#     if len(candle['Open']) == 0:
-#         print("No data for this symbol")
-#     else:
-#         print('close: ' + str(candle["Close"].values[0].item()))
-#         print('open: ' + str(candle["Open"].values[0].item()))
-#     print('\n\n')
+todayshalts = haltDirandPrice(todayshalts)
+todayshalts.to_csv(file_path, index=False)
+print(todayshalts.to_string())
 
 input("press anything to exit")
 driver.quit()
