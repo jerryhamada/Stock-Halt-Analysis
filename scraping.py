@@ -10,16 +10,17 @@ import os
 today = datetime.today().strftime('%Y-%m-%d')
 script_dir = os.path.dirname(os.path.realpath(__file__))
 global todayshalts
+global file_path
 todayshalts = pd.DataFrame()
 halt_data_dir = os.path.join(script_dir, "halt_data")
 file_path = os.path.join(halt_data_dir, f"halts_{today}.csv")
 
 # Function to download one-minute interval data for a given symbol and halt time
-def getCandle(symbol, halt_dt):
+def getCandle(symbol, dt):
     #returns the one minute candle rounded down
 
     # Floor the halt time to the minute
-    halt_ts = pd.Timestamp(halt_dt)
+    halt_ts = pd.Timestamp(dt)
     candle_time = halt_ts.floor('min')
     print("candle_time:", candle_time)
 
@@ -116,22 +117,57 @@ def getHalts():
 # Get the halts for today or not 
 def haltSaverChecker():
     user_input = input("Do you want to update today's halts and update the file? (y/n): ").strip().lower()
-    
+    global file_path
     if user_input == 'y':
         todayshalts = getHalts()
         todayshalts.to_csv(file_path, index=False)
         print(todayshalts.to_string())
 
     else:
-        todayshalts = pd.read_csv(file_path)
         # print(todayshalts.to_string())
-        print("okay pookie!")
+        date_input = input("Which date do you want to check? (yyyy-mm-dd): ").strip()
+        try:
+            datetime.strptime(date_input, "%Y-%m-%d")
+        except ValueError:
+            print("Invalid date format. Please use YYYY-MM-DD")
+            return None
+        print("debug1")
+        file_path = os.path.join(halt_data_dir, f"halts_{date_input}.csv")
+    
+    # Check if the file exists and load it if it does
+        if os.path.exists(file_path):
+            todayshalts = pd.read_csv(file_path)
+            print(f"File loaded successfully from {file_path}")
+            return todayshalts
+        else:
+            print(f"File not found: {file_path}")
+        return None
+
     return todayshalts
+
+def postHaltAnalysis(halts):
+    # did it resume in the direction of the halt and by how much?
+    for idx, row in halts.iterrows():
+        symbol = row['Ticker']
+        resume_dt = row['Resume_dt']
+        resume_ts = pd.Timestamp(resume_dt)
+        resume_ts = resume_ts.floor('min')
+        
+        curCandle = getCandle(symbol, resume_ts)
+        resume_price = curCandle['Open'].iloc[0].item()
+        percent_change = ((resume_price - row['Halt Price']) / row['Halt Price']) * 100
+        halts.loc[idx, 'Resumption Price'] = resume_price
+        halts.loc[idx, 'Percent Change'] = percent_change
+    return halts
 
 todayshalts = haltSaverChecker()
 print(todayshalts.to_string())
 
 todayshalts = haltDirandPrice(todayshalts)
+todayshalts.to_csv(file_path, index=False)
+print(todayshalts.to_string())
+
+todayshalts = postHaltAnalysis(todayshalts)
 todayshalts.to_csv(file_path, index=False)
 print(todayshalts.to_string())
 
