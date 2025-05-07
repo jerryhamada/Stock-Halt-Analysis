@@ -1,19 +1,16 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 import time
 import pandas as pd
 from bs4 import BeautifulSoup
 import yfinance as yf
 from datetime import datetime, timedelta
 import os
-
-today = datetime.today().strftime('%Y-%m-%d')
-script_dir = os.path.dirname(os.path.realpath(__file__))
-global todayshalts
-global file_path
-todayshalts = pd.DataFrame()
-halt_data_dir = os.path.join(script_dir, "halt_data")
-file_path = os.path.join(halt_data_dir, f"halts_{today}.csv")
+import boto3
+import io
+import requests
 
 # Function to download one-minute interval data for a given symbol and halt time
 def getCandle(symbol, dt):
@@ -32,7 +29,8 @@ def getCandle(symbol, dt):
     data = yf.download(symbol, start=start_dt, end=end_dt, interval='1m')
     return data
 
-#delete bad tickers
+#helper function to delete bad tickers
+# used in haltSaverChecker function
 def deleteBadTickers(halts):
     badTickeridx = []
     for idx, row in halts.iterrows():
@@ -41,14 +39,15 @@ def deleteBadTickers(halts):
         halt_dt = halt_dt.floor('min')
         candle = getCandle(symbol, halt_dt)
         if len(candle['Open']) == 0:
-            print("No data for this symbol: " + symbol)
+            # print("No data for this symbol: " + symbol)
             badTickeridx.append(idx)
     halts.drop(index=badTickeridx, inplace=True)
-    print(halts.to_string())
+    # print(halts.to_string())
     return halts
 
 # Function to calculate the halt direction and price
 def haltDirandPrice(halts):
+    print("\n\n started running haltDiandPrice function successfully")
     for idx, row in halts.iterrows():
         symbol = row['Ticker']
         halt_dt = row['Halt_dt']
@@ -71,7 +70,28 @@ def haltDirandPrice(halts):
             direction = 'DOWN'
         halts.loc[idx, 'Direction'] = direction
         halts.loc[idx, 'Halt Price'] = halt_price
+    print("\n\nfinished running haltDiandPrice function successfully")
+    print(halts.to_string())
     return halts
+
+# def make_driver():
+#     chrome_opts = Options()
+#     chrome_opts.add_argument("--headless")                # HEADLESS MODE
+#     chrome_opts.add_argument("--disable-gpu")             # recommended for Windows
+#     chrome_opts.add_argument("--no-sandbox")              # required on many Linux hosts
+#     chrome_opts.add_argument("--disable-dev-shm-usage")   # overcome limited /dev/shm
+
+#     # **Point Chrome at the layer’s headless binary**
+#     chrome_opts.binary_location = "/opt/headless-chrome/headless-chrome"
+#     driver_path = "/opt/chromedriver/bin/chromedriver"
+#     service = Service(driver_path)
+
+#     # **Point WebDriver at the layer’s chromedriver**
+#     driver = webdriver.Chrome(
+#         service = service,
+#         options=chrome_opts
+#     )
+#     return driver
 
 # helper function to get the halts
 def getHalts():
@@ -85,8 +105,13 @@ def getHalts():
 
     # Parse the HTML with BeautifulSoup
     soup = BeautifulSoup(div_html, 'html.parser')
+    time.sleep(5)
     table = soup.find("table")
 
+
+    # print("table:", table)
+    if not table:
+        raise RuntimeError("No table found in the HTML.")
     # Extract headers from the first row
     headers = [th.get_text(strip=True) for th in table.find("tr").find_all("th")]
 
@@ -116,37 +141,17 @@ def getHalts():
 
 # Get the halts for today or not 
 def haltSaverChecker():
-    user_input = input("Do you want to update today's halts and update the file? (y/n): ").strip().lower()
-    global file_path
-    if user_input == 'y':
-        todayshalts = getHalts()
-        todayshalts.to_csv(file_path, index=False)
-        print(todayshalts.to_string())
-
-    else:
-        # print(todayshalts.to_string())
-        date_input = input("Which date do you want to check? (yyyy-mm-dd): ").strip()
-        try:
-            datetime.strptime(date_input, "%Y-%m-%d")
-        except ValueError:
-            print("Invalid date format. Please use YYYY-MM-DD")
-            return None
-        print("debug1")
-        file_path = os.path.join(halt_data_dir, f"halts_{date_input}.csv")
-    
-    # Check if the file exists and load it if it does
-        if os.path.exists(file_path):
-            todayshalts = pd.read_csv(file_path)
-            print(f"File loaded successfully from {file_path}")
-            return todayshalts
-        else:
-            print(f"File not found: {file_path}")
-        return None
-
+    todayshalts = getHalts()
+    print("hello world")
+    print("type" + str(type(todayshalts)))
+    print(todayshalts.to_string())
     return todayshalts
 
+# function to do the resumption price and percent change analysis
 def postHaltAnalysis(halts):
-    # did it resume in the direction of the halt and by how much?
+    # adds the columns resumption price and percent change to the halts dataframe
+    print("\n\n started running postHaltAnalysis function successfully")
+    badTickeridx = []
     for idx, row in halts.iterrows():
         symbol = row['Ticker']
         resume_dt = row['Resume_dt']
@@ -154,22 +159,71 @@ def postHaltAnalysis(halts):
         resume_ts = resume_ts.floor('min')
         
         curCandle = getCandle(symbol, resume_ts)
+        if len(curCandle['Open']) == 0:
+            # If no data is available, skip this row
+            badTickeridx.append(idx)
+            continue
         resume_price = curCandle['Open'].iloc[0].item()
         percent_change = ((resume_price - row['Halt Price']) / row['Halt Price']) * 100
         halts.loc[idx, 'Resumption Price'] = resume_price
         halts.loc[idx, 'Percent Change'] = percent_change
+    halts.drop(index=badTickeridx, inplace=True)
+
+    print("\n\n finished running postHaltAnalysis function successfully")
+
     return halts
 
-todayshalts = haltSaverChecker()
-print(todayshalts.to_string())
+# fucntion to upload the dataframe to s3
+def upload_to_s3(df):
+    BUCKET = "allhalts"
 
-todayshalts = haltDirandPrice(todayshalts)
-todayshalts.to_csv(file_path, index=False)
-print(todayshalts.to_string())
+# 3) Serialize DataFrame to CSV in memory
+    buffer = io.StringIO()
+    df.to_csv(buffer, index=False)
+    csv_bytes = buffer.getvalue().encode("utf-8")
 
-todayshalts = postHaltAnalysis(todayshalts)
-todayshalts.to_csv(file_path, index=False)
-print(todayshalts.to_string())
+# 4) Construct a timestamped key
+    today = datetime.today().strftime('%Y-%m-%d')
+    key = f"raw/{today}/halts_test.csv"
 
-input("press anything to exit")
-driver.quit()
+    # 5) Upload to S3
+    s3 = boto3.client("s3")
+    s3.put_object(Bucket=BUCKET, Key=key, Body=csv_bytes)
+    return key
+
+    print(f"✅ Uploaded test CSV to s3://{BUCKET}/{key}")
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda entry point.
+    Ignores `event`/`context` for now—just runs your main pipeline.
+    """
+    try:
+        # 1) Run your main logic (which returns the S3 key)
+        s3_key = main()
+
+        # 2) Return a simple success payload
+        return {
+            "statusCode": 200,
+            "body": {
+                "message":     "Upload successful",
+                "uploadedKey": s3_key
+            }
+        }
+
+    except Exception as e:
+        # Print the error so it shows up in CloudWatch Logs
+        print("Error in lambda_handler:", e, flush=True)
+        # Rethrow so Lambda marks the invocation as a failure
+        raise
+
+def main():
+    todayshalts = pd.DataFrame()
+    todayshalts = haltSaverChecker()
+    todayshalts = haltDirandPrice(todayshalts)
+    todayshalts = postHaltAnalysis(todayshalts)
+    s3_key = upload_to_s3(todayshalts)
+    return s3_key
+
+result = lambda_handler({}, None)
+print(result)
